@@ -1,6 +1,6 @@
 # app.R
 
-# 0) SET-UP ----------------
+# SET-UP ----------------
 library(shiny)
 library(bslib)
 library(ggplot2)
@@ -11,6 +11,8 @@ library(tidyverse)
 library(rio)
 library(here)
 library(janitor)
+library(plotly)
+library(shinyWidgets)
 
 # Import Depression MA data
 
@@ -26,7 +28,7 @@ dpo_raw <- import(here("data", "Depression_Overview_Study_Level_Distiller.xlsx")
   
 
 
-# 1) THEME & DUMMY DATA --------------------------------------------------
+# SET THEME & MAPPINGS --------------------------------------------------
 
 my_teal    <- "#489D46"
 my_dark    <- "#4D5859"
@@ -44,22 +46,17 @@ my_theme <- bs_theme(
   font_scale   = 1.2
 )
 
-set.seed(42)
-df_demo <- data.frame(
-  study_name   = paste("Study", 1:12),
-  problem      = rep(c("Anxiety","Depression","ADHD"), each = 4),
-  intervention = rep(c("CBT","Mindfulness","SEL","Family","MTSS"), length.out = 12),
-  age_group    = rep(c("Elementary","Middle School","High School","All Ages"), times = 3),
-  mean_effect  = runif(12, -0.5, 0.8)
-) %>%
-  rowwise() %>%
-  mutate(
-    half_width  = runif(1, 0.1, 0.3),
-    x95_lower   = mean_effect - half_width,
-    x95_upper   = mean_effect + half_width,
-    sample_size = sample(50:200, 1)
-  ) %>%
-  ungroup()
+beneficial_negative_flags <- tibble::tribble(
+  ~outcome_domain,                ~beneficial_when_negative,
+  "Depression symptoms",    TRUE,
+  "Anxiety symptoms",       TRUE,
+  "Suicidal ideation",      TRUE,
+  "Well-being",             FALSE,
+  "Educational Achievement", FALSE
+)
+
+
+# TIDY DATA ---------------------------------------------------------
 
 # Clean Depression Data
 
@@ -146,73 +143,17 @@ dpo_app <- dpo_full %>%
     study_name   = study_name       # already renamed upstream
   )
 
-# 2a) Jitter‐only plot (studies only) -------------------------------------
+# MERGE AND Add effect size direction mapping----------------------------------
+dpo_app <- dpo_app %>%
+  left_join(beneficial_negative_flags, by = "outcome_domain") %>%
+  mutate(
+    beneficial_when_negative = dplyr::coalesce(beneficial_when_negative, TRUE), #TRUE = default
+    targeted_behavior_label = "Depression Prevention"
+  )
 
-# plot_jitter <- function(df, effect_better = "positive") {
-#   pos_col <- if (effect_better=="positive") "#007030" else "#964B00"
-#   neg_col <- if (effect_better=="positive") "#964B00" else "#007030"
-#   
-#   df2 <- df %>%
-#     mutate(
-#       sd_i      = (x95_upper - x95_lower)/(2*1.96),
-#       precision = 1/sd_i
-#     )
-#   levels_y <- df2$study_name
-#   
-#   set.seed(2025)
-#   cloud <- df2 %>%
-#     rowwise() %>%
-#     mutate(draws = list(rnorm(200, mean_effect, sd = sd_i))) %>%
-#     unnest(draws) %>%
-#     ungroup() %>%
-#     mutate(
-#       y_label  = factor(study_name, levels = levels_y),
-#       draw_dir = draws > 0
-#     )
-#   
-#   pts <- df2 %>%
-#     mutate(
-#       y_label = factor(study_name, levels = levels_y),
-#       dir     = mean_effect > 0
-#     )
-#   
-#   # candidate breaks at 0%, 50%, 100% quantiles
-#   precs      <- df2$precision
-#   candidate  <- as.numeric(quantile(precs, c(0, 0.5, 1)))
-#   labs       <- c("Least precise", "Medium precise", "Most precise")
-#   # dedupe to avoid ggplot error
-#   brks       <- unique(candidate)
-#   labs_final <- labs[match(brks, candidate)]
-#   
-#   ggplot() +
-#     annotate("rect", xmin=-Inf, xmax=0, ymin=-Inf, ymax=Inf, fill=neg_col, alpha=0.05) +
-#     annotate("rect", xmin=0,    xmax=Inf, ymin=-Inf, ymax=Inf, fill=pos_col, alpha=0.05) +
-#     geom_vline(xintercept=0, linetype="dashed", color="gray70") +
-#     
-#     geom_jitter(data=cloud,
-#                 aes(x=draws, y=y_label, fill=draw_dir),
-#                 shape=21, color="black", alpha=0.04,
-#                 size=1.2, height=0.1, show.legend=FALSE) +
-#     
-#     geom_point(data=pts,
-#                aes(x=mean_effect, y=y_label,
-#                    size=precision, color=dir),
-#                shape=19, show.legend=FALSE) +
-#     
-#     scale_fill_manual(values = c(`TRUE`=pos_col, `FALSE`=neg_col), guide="none") +
-#     scale_color_manual(values = c(`TRUE`=pos_col, `FALSE`=neg_col), guide="none") +
-#     scale_size_continuous(
-#       name   = "Precision",
-#       range  = c(2, 6),
-#       breaks = brks,
-#       labels = labs_final
-#     ) +
-#     
-#     labs(x="Effect Size", y=NULL) +
-#     theme_minimal(base_family="Source Sans Pro") +
-#     theme(axis.text.y = element_text(color = my_dark))
-# }
+# PLOT FUNCTIONS -----------------------------------------------
 
+# Function to plot jitter
 plot_jitter <- function(df, effect_better = "positive") {
   pos_col <- if (effect_better=="positive") "#007030" else "#964B00"
   neg_col <- if (effect_better=="positive") "#964B00" else "#007030"
@@ -292,9 +233,8 @@ plot_jitter <- function(df, effect_better = "positive") {
     theme(axis.text.y = element_text(color = my_dark))
 }
 
-#different by timepoint, intervention (what else?)
 
-# 2b) Density of overall --------------------------------------------------
+# Function to plot Density of overall 
 
 plot_density <- function(df, effect_better = "positive") {
   pos_col <- if (effect_better=="positive") "#007030" else "#964B00"
@@ -323,45 +263,224 @@ plot_density <- function(df, effect_better = "positive") {
     )
 }
 
+# plot_overall_jitter <- function(df, effect_better = "positive") {
+#   pos_col <- if (effect_better=="positive") "#007030" else "#964B00"
+#   neg_col <- if (effect_better=="positive") "#964B00" else "#007030"
+#   z <- qnorm(0.975)
+#   
+#   # per-study sd from CI and precision
+#   df2 <- df %>%
+#     mutate(
+#       sd_i      = (x95_upper - x95_lower) / (2*1.96),
+#       precision = 1 / pmax(sd_i, .Machine$double.eps),
+#       dir       = mean_effect > 0,
+#       y_label   = factor("All studies")     # single row
+#     )
+#   
+#   # weights (sample-size weighted)
+#   w <- df2$sample_size
+#   w[is.na(w) | w <= 0] <- 1                 # small guard so NA/0 doesn't blow up
+#   
+#   overall_m  <- sum(df2$mean_effect * w, na.rm = TRUE) / sum(w, na.rm = TRUE)
+#   se_overall <- sqrt(sum((w^2) * (df2$sd_i^2), na.rm = TRUE)) / sum(w, na.rm = TRUE)
+#   overall_lo <- overall_m - z * se_overall
+#   overall_hi <- overall_m + z * se_overall
+#   overall_df <- data.frame(
+#     y_label = factor("All studies"),
+#     m = overall_m, lo = overall_lo, hi = overall_hi,
+#     dir = overall_m > 0
+#   )
+#   
+#   ggplot() +
+#     annotate("rect", xmin=-Inf, xmax=0, ymin=-Inf, ymax=Inf, fill=neg_col, alpha=0.05) +
+#     annotate("rect", xmin=0,    xmax=Inf, ymin=-Inf, ymax=Inf, fill=pos_col, alpha=0.05) +
+#     geom_vline(xintercept=0, linetype="dashed", color="gray70") +
+#     
+#     # jittered per-study points
+#     geom_jitter(
+#       data = df2,
+#       aes(x = mean_effect, y = y_label, fill = dir),
+#       shape = 21, color = "black", alpha = 0.25, size = 2,
+#       height = 0.12, width = 0, show.legend = FALSE
+#     ) +
+#     
+#     # overall CI + point
+#     geom_errorbarh(
+#       data = overall_df,
+#       aes(y = y_label, xmin = lo, xmax = hi),
+#       height = 0.14, linewidth = 0.9, color = "black"
+#     ) +
+#     geom_point(
+#       data = overall_df,
+#       aes(x = m, y = y_label),
+#       shape = 23, size = 5,
+#       fill = if (overall_m > 0) pos_col else neg_col,
+#       color = "black"
+#     ) +
+#     
+#     scale_fill_manual(values = c(`TRUE`=pos_col, `FALSE`=neg_col), guide="none") +
+#     labs(x = "Effect Size", y = NULL) +
+#     theme_minimal(base_family = "Source Sans Pro") +
+#     theme(
+#       axis.text.y = element_text(color = my_dark),
+#       panel.grid.major.y = element_blank(),
+#       plot.margin = margin(5,5,20,5)
+#     )
+# }
+
+# plot_overall_jitter <- function(df, effect_better = "positive") {
+#   pos_col <- if (effect_better=="positive") "#007030" else "#964B00"
+#   neg_col <- if (effect_better=="positive") "#964B00" else "#007030"
+#   z <- qnorm(0.975)
+#   
+#   # per-study sd from CI and precision + tooltip
+#   df2 <- df %>%
+#     mutate(
+#       study_name = dplyr::if_else(is.na(study_name) | study_name=="", paste0("Ref ", refid), study_name),
+#       sd_i      = (x95_upper - x95_lower) / (2*1.96),
+#       precision = 1 / pmax(sd_i, .Machine$double.eps),
+#       dir       = mean_effect > 0,
+#       y_label   = factor("All studies"),
+#       tooltip = paste0(
+#         "<b>", study_name, "</b>",
+#         "<br>Effect size: <b>", sprintf("%.2f", mean_effect), "</b>",
+#         "<br>95% CI: <b>[", sprintf("%.2f", x95_lower), ", ", sprintf("%.2f", x95_upper), "]</b>",
+#         "<br>N: <b>", ifelse(is.na(sample_size), "—", format(sample_size, big.mark=",")), "</b>",
+#         "<br>Intervention: <b>", ifelse(is.na(intervention), "—", intervention), "</b>",
+#         "<br>Outcome: <b>", ifelse(is.na(problem), "—", problem), "</b>",
+#         "<br>Measure: <b>", ifelse(is.na(outcome_measure), "—", outcome_measure), "</b>",
+#         "<br>Timepoint: <b>", ifelse(is.na(outcome_timepoint), "—", outcome_timepoint), "</b>"
+#       )
+#     )
+#   
+#   # weights (sample-size weighted)
+#   w <- df2$sample_size
+#   w[is.na(w) | w <= 0] <- 1
+#   
+#   overall_m  <- sum(df2$mean_effect * w, na.rm = TRUE) / sum(w, na.rm = TRUE)
+#   se_overall <- sqrt(sum((w^2) * (df2$sd_i^2), na.rm = TRUE)) / sum(w, na.rm = TRUE)
+#   overall_lo <- overall_m - z * se_overall
+#   overall_hi <- overall_m + z * se_overall
+#   
+#   overall_df <- data.frame(
+#     y_label = factor("All studies"),
+#     m = overall_m, lo = overall_lo, hi = overall_hi,
+#     dir = overall_m > 0
+#   )
+#   
+#   ggplot() +
+#     annotate("rect", xmin=-Inf, xmax=0, ymin=-Inf, ymax=Inf, fill=neg_col, alpha=0.05) +
+#     annotate("rect", xmin=0,    xmax=Inf, ymin=-Inf, ymax=Inf, fill=pos_col, alpha=0.05) +
+#     geom_vline(xintercept=0, linetype="dashed", color="gray70") +
+#     
+#     # jittered per-study points (SAME AS BEFORE) + hover text
+#     geom_jitter(
+#       data = df2,
+#       aes(x = mean_effect, y = y_label, fill = dir, text = tooltip),
+#       shape = 21, color = NA, alpha = 0.5, size = 2,
+#       height = 0.12, width = 0, show.legend = FALSE
+#     ) +
+#     
+#     # overall CI + point (unchanged)
+#     geom_errorbarh(
+#       data = overall_df,
+#       aes(y = y_label, xmin = lo, xmax = hi),
+#       height = 0.14, linewidth = 0.9, color = "black"
+#     ) +
+#     geom_point(
+#       data = overall_df,
+#       aes(x = m, y = y_label),
+#       shape = 23, size = 5,
+#       fill = if (overall_m > 0) pos_col else neg_col,
+#       color = "black"
+#     ) +
+#     
+#     scale_fill_manual(values = c(`TRUE`=pos_col, `FALSE`=neg_col), guide="none") +
+#     labs(x = "Effect Size", y = NULL) +
+#     theme_minimal(base_family = "Source Sans Pro") +
+#     theme(
+#       axis.text.y = element_text(color = my_dark),
+#       panel.grid.major.y = element_blank(),
+#       plot.margin = margin(5,5,20,5)
+#     )
+# }
+
 plot_overall_jitter <- function(df, effect_better = "positive") {
   pos_col <- if (effect_better=="positive") "#007030" else "#964B00"
   neg_col <- if (effect_better=="positive") "#964B00" else "#007030"
   z <- qnorm(0.975)
   
-  # per-study sd from CI and precision (same as your other plot)
   df2 <- df %>%
     mutate(
+      # per-study sd from CI and precision
       sd_i      = (x95_upper - x95_lower) / (2*1.96),
       precision = 1 / pmax(sd_i, .Machine$double.eps),
-      dir       = mean_effect > 0,
-      y_label   = factor("All studies")     # single row
+      
+      # --- outcome-aware "beneficial" direction ---
+      # expects a logical column beneficial_when_negative in df:
+      # TRUE  => negative effects are beneficial
+      # FALSE => positive effects are beneficial
+      beneficial = dplyr::if_else(
+        beneficial_when_negative,
+        mean_effect < 0,
+        mean_effect > 0
+      ),
+      
+      # tooltip (same approach as before)
+      study_name = dplyr::if_else(is.na(study_name) | study_name=="", paste0("Ref ", refid), study_name),
+      y_label   = factor("All studies"),
+      tooltip = paste0(
+        "<b>", targeted_behavior_label, "</b>",
+        "<br>Effect size: <b>", sprintf("%.2f", mean_effect), "</b>",
+        "<br>95% CI: <b>[", sprintf("%.2f", x95_lower), ", ", sprintf("%.2f", x95_upper), "]</b>",
+        "<br>N: <b>", ifelse(is.na(sample_size), "—", format(sample_size, big.mark=",")), "</b>",
+        "<br>Intervention: <b>", ifelse(is.na(intervention), "—", intervention), "</b>",
+        "<br>Outcome: <b>", ifelse(is.na(problem), "—", problem), "</b>",
+        "<br>Measure: <b>", ifelse(is.na(outcome_measure), "—", outcome_measure), "</b>",
+        "<br>Timepoint: <b>", ifelse(is.na(outcome_timepoint), "—", outcome_timepoint), "</b>",
+        "<br>Study: <b>", study_name, "</b>"
+      )
     )
   
-  # weights (sample-size weighted — matches your summary text)
+  # weights (sample-size weighted)
   w <- df2$sample_size
-  w[is.na(w) | w <= 0] <- 1                 # small guard so NA/0 doesn't blow up
+  w[is.na(w) | w <= 0] <- 1
   
   overall_m  <- sum(df2$mean_effect * w, na.rm = TRUE) / sum(w, na.rm = TRUE)
   se_overall <- sqrt(sum((w^2) * (df2$sd_i^2), na.rm = TRUE)) / sum(w, na.rm = TRUE)
   overall_lo <- overall_m - z * se_overall
   overall_hi <- overall_m + z * se_overall
+  
+  # --- overall beneficial direction ---
+  # If mixed directions exist, choose the "majority rule" based on the filtered data:
+  # (1) Determine which direction is more common: beneficial_when_negative TRUE vs FALSE
+  # (2) Evaluate overall_m accordingly
+  neg_better_majority <- mean(df2$beneficial_when_negative, na.rm = TRUE) >= 0.5
+  
+  overall_beneficial <- if (neg_better_majority) overall_m < 0 else overall_m > 0
+  
   overall_df <- data.frame(
     y_label = factor("All studies"),
     m = overall_m, lo = overall_lo, hi = overall_hi,
-    dir = overall_m > 0
+    beneficial = overall_beneficial
   )
   
   ggplot() +
-    annotate("rect", xmin=-Inf, xmax=0, ymin=-Inf, ymax=Inf, fill=neg_col, alpha=0.05) +
-    annotate("rect", xmin=0,    xmax=Inf, ymin=-Inf, ymax=Inf, fill=pos_col, alpha=0.05) +
+    # NOTE: removed the green/brown background rects (neutral background)
+    
     geom_vline(xintercept=0, linetype="dashed", color="gray70") +
     
-    # jittered per-study points
+    # jittered per-study points (outcome-aware color)
     geom_jitter(
       data = df2,
-      aes(x = mean_effect, y = y_label, fill = dir),
-      shape = 21, color = "black", alpha = 0.25, size = 2,
-      height = 0.12, width = 0, show.legend = FALSE
+      aes(x = mean_effect, y = y_label, fill = beneficial, text = tooltip),
+      shape = 21,
+      color = NA,          # no borders (esp. for plotly)
+      alpha = 0.25,
+      size = 2,
+      height = 0.12,
+      width = 0,
+      show.legend = FALSE
     ) +
     
     # overall CI + point
@@ -374,7 +493,7 @@ plot_overall_jitter <- function(df, effect_better = "positive") {
       data = overall_df,
       aes(x = m, y = y_label),
       shape = 23, size = 5,
-      fill = if (overall_m > 0) pos_col else neg_col,
+      fill = if (overall_beneficial) pos_col else neg_col,
       color = "black"
     ) +
     
@@ -382,13 +501,17 @@ plot_overall_jitter <- function(df, effect_better = "positive") {
     labs(x = "Effect Size", y = NULL) +
     theme_minimal(base_family = "Source Sans Pro") +
     theme(
-      axis.text.y = element_text(color = my_dark),
+      #axis.text.y = element_text(color = my_dark),
       panel.grid.major.y = element_blank(),
-      plot.margin = margin(5,5,20,5)
+      plot.margin = margin(5,5,20,5),
+      legend.position = "none",
+      axis.title.y = element_blank(), # Removes the axis title (e.g., "y_variable")
+      axis.text.y = element_blank(),  # Removes the tick mark labels (e.g., numbers)
     )
 }
 
-# 3) UI -------------------------------------------------------------------
+
+# UI -------------------------------------------------------------------
 
 ui <- fluidPage(
   theme = my_theme,
@@ -466,19 +589,23 @@ ui <- fluidPage(
   )
 )
 
-# 4) SERVER ---------------------------------------------------------------
+# SERVER ---------------------------------------------------------------
 
 server <- function(input, output, session) {
   rv <- reactiveValues(
     page        = 1,
-    chosen_prob = "Anxiety",
+    chosen_target = "All",
+    chosen_prob = "All",
     chosen_int  = "All",
+    chosen_branded = character(0),
     chosen_age  = "All Ages"
   )
   
   # Sync filters
+  observeEvent(input$targeted_behavior, rv$chosen_target  <- input$targeted_behavior, ignoreNULL=TRUE)
   observeEvent(input$problem,     rv$chosen_prob <- input$problem,     ignoreNULL=TRUE)
-  observeEvent(input$intervention,rv$chosen_int  <- input$intervention,ignoreNULL=TRUE)
+  observeEvent(input$intervention_filter, rv$chosen_int  <- input$intervention_filter,ignoreNULL=TRUE)
+  observeEvent(input$branded_interventions, rv$chosen_branded <- input$branded_interventions, ignoreNULL = FALSE)
   observeEvent(input$age_group,   rv$chosen_age  <- input$age_group,   ignoreNULL=TRUE)
   
   # Sidebar
@@ -507,15 +634,23 @@ server <- function(input, output, session) {
     switch(as.character(rv$page),
            "1" = div(class="wizard-panel",
                      h2("Welcome"),
-                     p("Explore K–12 school‐based mental health prevention evidence."),
+                     p(HTML("Explore K–12 school‐based mental health prevention evidence.
+                       <br>
+                       - Need to make clear that we don’t have evidence on every study that evalutated depression, etc. but had depresion etc. prevention intervention focus
+                       <br>")),
                      div(class="wizard-footer",
                          actionButton("to_page2", "Get Started →", class="btn btn-primary")
                      )
            ),
            "2" = div(class="wizard-panel",
-                     h2("Step 1: Select Problem Domain(s)"),
+                     h2("Step 1: Select Intervention Target - PROJECT"), # I want to look at interventions focused on...
+                     checkboxGroupInput("targeted_behavior", NULL,
+                                        choices = c("All", "Anxiety Prevention","Depression Prevention","Suicide Prevention"),
+                                        selected = rv$chosen_target),
+                     hr(),
+                     h2("Select Student Outcome"),
                      checkboxGroupInput("problem", NULL,
-                                        choices = c("Anxiety","Depression","Suicide","Well-Being","Educational Attainment", "project or outcome level?"),
+                                        choices = c("All", "Anxiety","Depression","Suicide","Well-being","Educational Achievement"),
                                         selected = rv$chosen_prob),
                      div(class="wizard-footer",
                          actionButton("back_to1","← Back", class="btn btn-secondary"),
@@ -523,10 +658,39 @@ server <- function(input, output, session) {
                      )
            ),
            "3" = div(class="wizard-panel",
-                     h2("Step 2: Select Intervention Type(s)"),
-                     checkboxGroupInput("intervention", NULL,
-                                        choices = c("All Interventions"="All","CBT","Mindfulness","SEL","Family","groupings or specific names?"),
-                                        selected = rv$chosen_int),
+                     # h2("Step 2: Select Intervention Type(s)"),
+                     # checkboxGroupInput("intervention", NULL,
+                     #                    choices = c("All Interventions"="All","CBT","Mindfulness","SEL","Family","Grouping (component/characteristic) OR specific interventions?"),
+                     #                    selected = rv$chosen_int),
+                     h2("Step 2: Select Intervention(s)"),
+                     
+                     radioButtons(
+                       inputId = "intervention_filter",
+                       label   = NULL,
+                       choices = c(
+                         "Show all interventions" = "All",
+                         "Filter to branded intervention(s)" = "Branded"
+                       ),
+                       selected = rv$chosen_int
+                     ),
+                     
+                     conditionalPanel(
+                       condition = "input.intervention_filter == 'Branded'",
+                       shinyWidgets::pickerInput(
+                         inputId  = "branded_interventions",
+                         label    = "Choose branded intervention(s):",
+                         choices  = sort(unique(na.omit(dpo_app$intervention))),
+                         selected = rv$chosen_branded,
+                         multiple = TRUE,
+                         options  = list(
+                           `live-search` = TRUE,
+                           `actions-box` = TRUE,
+                           `selected-text-format` = "count > 2",
+                           `none-selected-text` = "Search and select one or more interventions",
+                           style = "btn-bg"
+                         )
+                       )
+                     ),
                      div(class="wizard-footer",
                          actionButton("back_to2","← Back", class="btn btn-secondary"),
                          actionButton("to_page4","Proceed →", class="btn btn-primary")
@@ -546,18 +710,29 @@ server <- function(input, output, session) {
                      h2("Results"),
                      p("You selected:"),
                      tags$ul(
-                       tags$li(strong("Problem(s): "), paste(rv$chosen_prob, collapse=", "),
+                       tags$li(strong("Targeted behavior(s): "), paste(rv$chosen_target, collapse=", "),
                                actionLink("edit_prob", "(Edit)")),
-                       tags$li(strong("Intervention(s): "), paste(rv$chosen_int, collapse=", "),
-                               actionLink("edit_int", "(Edit)")),
+                       tags$li(strong("Outcome(s): "), paste(rv$chosen_prob, collapse=", "),
+                               actionLink("edit_prob", "(Edit)")),
+                       # tags$li(strong("Intervention(s): "), paste(rv$chosen_int, collapse=", "),
+                       #         actionLink("edit_int", "(Edit)")),
+                       tags$li(
+                         strong("Intervention(s): "),
+                         if (rv$chosen_int == "All") "All"
+                         else if (length(rv$chosen_branded) == 0) "None selected"
+                         else paste(rv$chosen_branded, collapse = ", "),
+                         actionLink("edit_int", "(Edit)")
+                       ),
                        tags$li(strong("Age Group(s): "), paste(rv$chosen_age, collapse=", "),
                                actionLink("edit_age", "(Edit)"))
-                     ), hr(),
+                     ), 
+                     p(strong(HTML("What to do with dependent and different direction effect sizes when showing estimates/aggregating? <br> What else to show on this page?"))), #NOTES TO REMOVE TODO
+                     hr(),
                      uiOutput("results_text"),
-                     div(class="plot-panel", plotOutput("results_jitter", height="300px")),
-                     div(class="plot-panel", plotOutput("results_density", height="150px")), hr(),
-                     h4("Filtered Data"),
-                     div(class="table-container", tableOutput("filtered_table")),
+                     #div(class="plot-panel", plotOutput("results_jitter", height="300px")), removed individual jitter plot
+                     div(class="plot-panel", plotlyOutput("results_density", height="200px")), hr(),
+                     # h4("Filtered Data"),
+                     # div(class="table-container", tableOutput("filtered_table")),
                      div(class="wizard-footer",
                          actionButton("back_to4","← Back", class="btn btn-secondary"),
                          actionButton("start_over","Start Over", class="btn",
@@ -578,8 +753,10 @@ server <- function(input, output, session) {
   observeEvent(input$back_to4,    rv$page <- 4)
   observeEvent(input$start_over, {
     rv$page        <- 1
-    rv$chosen_prob <- "Anxiety"
+    rv$chosen_target <- "All"
+    rv$chosen_prob <- "All"
     rv$chosen_int  <- "All"
+    rv$chosen_branded <- character(0)
     rv$chosen_age  <- "All Ages"
   })
   
@@ -596,20 +773,55 @@ server <- function(input, output, session) {
   observeEvent(input$edit_age,  rv$page <- 4)
   
   # Filtered data
+  # filtered_df <- reactive({
+  #   df <- dpo_app[dpo_app$problem %in% rv$chosen_prob, ]
+  #   if (!("All" %in% rv$chosen_int))    df <- df[df$intervention %in% rv$chosen_int, ]
+  #   if (!("All Ages" %in% rv$chosen_age)) df <- df[df$age_group %in% rv$chosen_age, ]
+  #   df
+  # })
+  
   filtered_df <- reactive({
-    df <- dpo_app[dpo_app$problem %in% rv$chosen_prob, ]
-    if (!("All" %in% rv$chosen_int))    df <- df[df$intervention %in% rv$chosen_int, ]
-    if (!("All Ages" %in% rv$chosen_age)) df <- df[df$age_group %in% rv$chosen_age, ]
+    df <- dpo_app
+    
+    #1)project-level filter (use your actual column name)
+    if (!is.null(rv$chosen_target) && !("All" %in% rv$chosen_target)) {
+      df <- df[df$targeted_behavior_label %in% rv$chosen_target, ]
+    }
+    
+    #2)outcome-level filter (use chosen_prob since that's what you have)
+    if (!is.null(rv$chosen_prob) && !("All" %in% rv$chosen_prob)) {
+      df <- df[df$outcome_domain %in% rv$chosen_prob, ]
+    }
+    
+    #3)intervention
+    # if (!is.null(rv$chosen_int) && !("All" %in% rv$chosen_int)) {
+    #   df <- df[df$intervention %in% rv$chosen_int, ]
+    # }
+    
+    if (!is.null(rv$chosen_int) && rv$chosen_int == "Branded") {
+      if (!is.null(rv$chosen_branded) && length(rv$chosen_branded) > 0) {
+        df <- df[df$intervention %in% rv$chosen_branded, ]
+      } else {
+        df <- df[0, ]  # branded mode but none selected
+      }
+    }
+    
+    #4)age
+    if (!is.null(rv$chosen_age) && !("All Ages" %in% rv$chosen_age)) {
+      df <- df[df$age_group %in% rv$chosen_age, ]
+    }
+    
     df
   })
   
-  output$filtered_table <- renderTable({
-    df <- filtered_df()
-    if (nrow(df)==0) return(data.frame(Note="No matching rows"))
-    df %>% select(study_name, problem, intervention, outcome_measure, outcome_timepoint, #age_group,
-                  mean_effect, x95_lower, x95_upper, sample_size) %>% 
-      arrange(study_name, intervention, outcome_measure, outcome_timepoint)
-  })
+  
+  # output$filtered_table <- renderTable({
+  #   df <- filtered_df()
+  #   if (nrow(df)==0) return(data.frame(Note="No matching rows"))
+  #   df %>% select(study_name, problem, intervention, outcome_measure, outcome_timepoint, #age_group,
+  #                 mean_effect, x95_lower, x95_upper, sample_size) %>% 
+  #     arrange(study_name, intervention, outcome_measure, outcome_timepoint)
+  # })
   
   output$results_text <- renderUI({
     df <- filtered_df()
@@ -643,20 +855,43 @@ server <- function(input, output, session) {
     ))
   })
   
-  output$results_jitter <- renderPlot({
+  # output$results_jitter <- renderPlot({
+  #   df <- filtered_df()
+  #   if (nrow(df)==0) return(NULL)
+  #   plot_jitter(df)
+  # })
+  
+  # output$results_density <- renderPlot({
+  #   df <- filtered_df()
+  #   if (nrow(df) < 2) return(NULL)
+  #   plot_overall_jitter(df)
+  # }, height = 180)
+  
+  output$results_density <- renderPlotly({
     df <- filtered_df()
-    if (nrow(df)==0) return(NULL)
-    plot_jitter(df)
+    if (nrow(df) < 1) return(NULL)
+    
+    p <- plot_overall_jitter(df)
+    
+    ggplotly(p, tooltip = "text") %>%
+      layout(
+        hoverlabel = list(
+          bgcolor = "white",     # <- force white background
+          bordercolor = "#333",  # subtle border (optional)
+          font = list(
+            color = "black",
+            size = 12
+          ),
+          align = "left"
+        )
+      )
   })
   
-  output$results_density <- renderPlot({
-    df <- filtered_df()
-    if (nrow(df) < 2) return(NULL)
-    plot_overall_jitter(df)
-  }, height = 180)
   
 }
 
-# 5) RUN APP --------------------------------------------------------------
+# RUN APP --------------------------------------------------------------
 
 shinyApp(ui, server)
+
+#rsconnect::deployApp()
